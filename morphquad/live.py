@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import math
 import os
 
 import numpy as np
@@ -45,7 +46,13 @@ BAD = (240, 90, 90)
 WARN = (240, 200, 90)
 
 
-def rotor_world(env: MorphQuadEnv):
+# A real 5-inch quad (~0.16 m span) is tiny next to a 2.8 m wall, so we draw the
+# airframe a bit bigger than life. The fold ratio (cos phi) is preserved, so the
+# visual still tells the truth: spread looks too wide for the hole, folded fits.
+DRONE_VIS_SCALE = 1.8
+
+
+def rotor_world(env: MorphQuadEnv, scale: float = DRONE_VIS_SCALE):
     """Return (centers (n,3), rotors (n,4,3), phi (n,)) as numpy, world frame."""
     d = env.cfg.drone
     n = env.n
@@ -53,7 +60,7 @@ def rotor_world(env: MorphQuadEnv):
     rx = (env.sx * d.half_span_x).expand(n, 4)
     ry = env.sy * d.half_span_y * torch.cos(phi)        # (n,4)
     rz = torch.zeros_like(rx)
-    rb = torch.stack((rx, ry, rz), dim=-1)              # (n,4,3) body frame
+    rb = torch.stack((rx, ry, rz), dim=-1) * scale      # (n,4,3) body frame
     R = Q.quat_to_rotmat(env.quat)                      # (n,3,3)
     rw = torch.einsum("nij,nkj->nki", R, rb) + env.pos[:, None, :]
     return (env.pos.detach().cpu().numpy(),
@@ -148,6 +155,117 @@ def draw_panel(pg, surf, font, panel: Panel, cfg, centers, rotors, phis,
     surf.blit(vl, (panel.x0 + 6, panel.y0 + panel.h // 2))
 
 
+# ====================================================================== 3D
+class Camera3D:
+    """Minimal perspective camera (world: x=forward, y=lateral, z=up)."""
+
+    def __init__(self, w, h, fov_deg=58.0):
+        self.w, self.h = w, h
+        self.focal = 0.5 * w / math.tan(math.radians(fov_deg) / 2)
+        self.eye = np.zeros(3)
+        self.R = np.eye(3)
+
+    def look_at(self, eye, target, up=(0.0, 0.0, 1.0)):
+        eye = np.asarray(eye, float); target = np.asarray(target, float)
+        up = np.asarray(up, float)
+        f = target - eye; f /= np.linalg.norm(f) + 1e-9
+        r = np.cross(f, up); r /= np.linalg.norm(r) + 1e-9
+        u = np.cross(r, f)
+        self.eye = eye
+        self.R = np.stack([r, u, f], axis=0)      # rows: right, up, forward
+
+    def project(self, pts):
+        """pts (...,3) -> (screen (...,2) float, depth (...), valid (...))."""
+        shape = pts.shape[:-1]
+        cam = (pts.reshape(-1, 3) - self.eye) @ self.R.T
+        z = cam[:, 2]
+        valid = z > 0.05
+        zc = np.where(valid, z, 1.0)
+        sx = self.w * 0.5 + self.focal * cam[:, 0] / zc
+        sy = self.h * 0.5 - self.focal * cam[:, 1] / zc
+        scr = np.stack([sx, sy], axis=-1)
+        return scr.reshape(shape + (2,)), z.reshape(shape), valid.reshape(shape)
+
+
+def _ipt(p, valid):
+    if not valid or not (np.isfinite(p[0]) and np.isfinite(p[1])):
+        return None
+    x = int(min(max(p[0], -2000), 4000))
+    y = int(min(max(p[1], -2000), 4000))
+    return (x, y)
+
+
+def _seg(pg, surf, cam, a, b, col, width=1):
+    P, _, V = cam.project(np.stack([a, b]))
+    pa = _ipt(P[0], V[0]); pb = _ipt(P[1], V[1])
+    if pa and pb:
+        pg.draw.line(surf, col, pa, pb, width)
+
+
+def draw_world_3d(pg, surf, cam, cfg, centers, rotors, phis, hud_h):
+    t = cfg.task
+    gx = t.gap_x
+
+    # ---- ground grid (z = 0) ----
+    x0, x1 = gx - 3.0, gx + 1.6
+    y0g, y1g = -1.6, 1.6
+    for gxx in np.arange(x0, x1 + 1e-3, 0.5):
+        _seg(pg, surf, cam, [gxx, y0g, 0], [gxx, y1g, 0], GRID)
+    for gyy in np.arange(y0g, y1g + 1e-3, 0.5):
+        _seg(pg, surf, cam, [x0, gyy, 0], [x1, gyy, 0], GRID)
+
+    # ---- wall (4 quads framing the slot), painter-sorted with drones ----
+    gy, gz, gw, gh = t.gap_y, t.gap_z, t.gap_width, t.gap_height
+    yl, yr = gy - gw / 2, gy + gw / 2
+    zb, zt = gz - gh / 2, gz + gh / 2
+    YL, YR, ZB, ZT = -1.4, 1.4, 0.0, 3.0
+    quads = [
+        [(gx, YL, ZB), (gx, YR, ZB), (gx, YR, zb), (gx, YL, zb)],   # bottom
+        [(gx, YL, zt), (gx, YR, zt), (gx, YR, ZT), (gx, YL, ZT)],   # top
+        [(gx, YL, zb), (gx, yl, zb), (gx, yl, zt), (gx, YL, zt)],   # left
+        [(gx, yr, zb), (gx, YR, zb), (gx, YR, zt), (gx, yr, zt)],   # right
+    ]
+    for q in quads:
+        pts = np.array(q, float)
+        P, Z, V = cam.project(pts)
+        if V.all():
+            poly = [(_ipt(P[i], V[i])) for i in range(4)]
+            if all(p is not None for p in poly):
+                pg.draw.polygon(surf, WALL, poly)
+                pg.draw.polygon(surf, (60, 68, 84), poly, 1)
+    # highlight the hole opening
+    hole = np.array([(gx, yl, zb), (gx, yr, zb), (gx, yr, zt), (gx, yl, zt)], float)
+    P, _, V = cam.project(hole)
+    if V.all():
+        poly = [_ipt(P[i], V[i]) for i in range(4)]
+        if all(p is not None for p in poly):
+            pg.draw.polygon(surf, GOOD, poly, 2)
+
+    # ---- drones, far-to-near ----
+    n = centers.shape[0]
+    _, depth, _ = cam.project(centers)
+    order = np.argsort(-depth)        # far first
+    for i in order:
+        col = DRONE0 if i == 0 else DRONE
+        cP, _, cV = cam.project(centers[i][None])
+        c = _ipt(cP[0], cV[0])
+        if c is None:
+            continue
+        # height drop-line to the ground for depth cue
+        ground = centers[i].copy(); ground[2] = 0.0
+        _seg(pg, surf, cam, centers[i], ground, GRID)
+        rP, _, rV = cam.project(rotors[i])     # (4,2)
+        for k in range(4):
+            r = _ipt(rP[k], rV[k])
+            if r is None:
+                continue
+            pg.draw.line(surf, ARM if i == 0 else col, c, r, 2 if i == 0 else 1)
+            rad = 4 if i == 0 else 3
+            pg.draw.circle(surf, col, r, rad)
+            pg.draw.circle(surf, (255, 255, 255), r, max(1, rad - 2))
+        pg.draw.circle(surf, col, c, 3)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Live pygame training viewer.")
     ap.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
@@ -161,6 +279,8 @@ def main():
     ap.add_argument("--no-amp", action="store_true")
     ap.add_argument("--stochastic", action="store_true",
                     help="show sampled (exploring) actions instead of the mean")
+    ap.add_argument("--view", default="3d", choices=["3d", "2d"],
+                    help="3d orbiting camera (default) or stacked 2d panels")
     ap.add_argument("--save", default="checkpoints/morphquad_live.pt")
     args = ap.parse_args()
 
@@ -196,6 +316,9 @@ def main():
     p_top = Panel((10, hud_h + (H - hud_h - 20) // 2 + 10, W - 20,
                    (H - hud_h - 20) // 2),
                   xr, (-0.75, 0.75), "y")
+    cam = Camera3D(W, H)
+    cam_t = 0.0
+    gx = cfg.task.gap_x
 
     # counters
     passes = crashes = timeouts = 0
@@ -253,20 +376,34 @@ def main():
 
             # ---------------- draw ----------------
             screen.fill(BG)
-            draw_panel(pg, screen, font, p_side, cfg, centers, rotors, phis,
-                       2, "SIDE VIEW  (fly through the hole)")
-            draw_panel(pg, screen, font, p_top, cfg, centers, rotors, phis,
-                       1, "TOP-DOWN  (arms fold to fit the slot)")
-
-            # flash outcome rings on env 0 in both panels
-            for i, fv in list(flash.items()):
-                fv[1] -= 1
-                if fv[1] <= 0:
-                    del flash[i]; continue
-                for panel, vidx in ((p_side, 2), (p_top, 1)):
-                    c = panel.pt(centers[i, 0], centers[i, vidx])
+            if args.view == "3d":
+                cam_t += 0.012
+                side = 2.4 * math.sin(cam_t)           # orbit side-to-side
+                cam.look_at(eye=(gx - 3.4, side, 1.7),
+                            target=(gx + 0.25, 0.0, 1.45))
+                draw_world_3d(pg, screen, cam, cfg, centers, rotors, phis, hud_h)
+                # flash outcome rings (project drone centre)
+                for i, fv in list(flash.items()):
+                    fv[1] -= 1
+                    if fv[1] <= 0:
+                        del flash[i]; continue
+                    P, _, V = cam.project(centers[i][None])
+                    c = _ipt(P[0], V[0])
                     if c is not None:
-                        pg.draw.circle(screen, fv[0], c, 16, 2)
+                        pg.draw.circle(screen, fv[0], c, 18, 2)
+            else:
+                draw_panel(pg, screen, font, p_side, cfg, centers, rotors, phis,
+                           2, "SIDE VIEW  (fly through the hole)")
+                draw_panel(pg, screen, font, p_top, cfg, centers, rotors, phis,
+                           1, "TOP-DOWN  (arms fold to fit the slot)")
+                for i, fv in list(flash.items()):
+                    fv[1] -= 1
+                    if fv[1] <= 0:
+                        del flash[i]; continue
+                    for panel, vidx in ((p_side, 2), (p_top, 1)):
+                        c = panel.pt(centers[i, 0], centers[i, vidx])
+                        if c is not None:
+                            pg.draw.circle(screen, fv[0], c, 16, 2)
 
             # ---------------- HUD ----------------
             total = passes + crashes + timeouts

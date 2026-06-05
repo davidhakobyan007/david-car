@@ -108,21 +108,26 @@ upd   120 | step   15,728,640 |  640,000 sps | ret  18.42 | len 142.3 | pass 61.
 `pass` is the fraction of episodes that cleanly folded through the slot — that's
 the number you want climbing.
 
-## Watch it LEARN, live (pygame)
+## Watch it LEARN, live in 3D (pygame)
 
 Train and watch at the same time — drones fly at the wall with the *current*
-policy while PPO keeps learning on the GPU, with live PASSED / CRASHED counters:
+policy while PPO keeps learning on the GPU, in a **live 3D view with an orbiting
+camera**, with PASSED / CRASHED counters:
 
 ```bash
-python -m morphquad.live                 # auto-detect GPU
+python -m morphquad.live                 # 3D view, auto-detect GPU
 python -m morphquad.live --envs 8192     # more parallel envs = more GPU load
+python -m morphquad.live --view 2d       # flat side + top-down panels instead
 python -m morphquad.live --device cpu --envs 256   # slow, just to try it
 ```
 
-Two stacked views share the same forward (x) axis:
+In the **3D view** you see the slotted wall, a ground grid, and the drones flying
+in from behind. As each one nears the hole it **folds its arms** — the airframe
+visibly narrows (spread looks too wide for the slot, folded slips through) — then
+unfolds on the far side. The camera slowly orbits so you get real depth.
 
-- **SIDE VIEW** (x vs z) — watch it fly *through the hole* and manage altitude.
-- **TOP-DOWN** (x vs y) — watch the *arms fold* so the body fits the slot.
+`--view 2d` gives two stacked flat panels sharing the forward (x) axis:
+**SIDE** (x vs z, fly through the hole) and **TOP-DOWN** (x vs y, arms folding).
 
 The HUD shows cumulative **PASSED / CRASHED / TIMEOUT** counts, a rolling
 pass-rate, training throughput (sps), and env-0's live arm-fold angle. Outcomes
