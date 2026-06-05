@@ -1,0 +1,10 @@
+# Core: install the CUDA build of torch on your GPU machine.
+# CPU/this-container fallback works too, just slower.
+#
+# For NVIDIA GPUs, install torch from the official index, e.g.:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+# (pick the cuXXX that matches your driver: https://pytorch.org/get-started/locally/)
+torch>=2.1
+numpy>=1.24
+matplotlib>=3.7      # 3D rollout viewer / GIF export
+imageio>=2.31        # optional, nicer GIF/MP4 writing

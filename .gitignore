@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# training artifacts
+checkpoints/
+*.pt
+runs/
+
+# generated rollouts (the committed demo lives in assets/)
+flight.gif
+smoke_flight.gif
+*.mp4
