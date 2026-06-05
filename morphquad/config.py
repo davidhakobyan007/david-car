@@ -29,7 +29,7 @@ class DroneConfig:
     prop_radius: float = 0.0635     # 5 inch prop -> ~0.0635 m radius (collision)
     core_inertia: tuple = (2.0e-3, 2.0e-3, 3.5e-3)  # body-core diag inertia
 
-    thrust_to_weight: float = 2.5   # total max thrust / weight
+    thrust_to_weight: float = 2.4   # total max thrust / weight (lower = calmer)
     yaw_coeff: float = 0.016        # rotor drag-torque / thrust ratio (yaw)
     motor_tau: float = 0.03         # 1st-order motor lag time constant (s)
 
@@ -90,6 +90,12 @@ class RewardConfig:
     ctrl_cost: float = 0.002        # penalize thrust magnitude
     fold_cost: float = 0.001        # penalize fold-rate effort
     spin_cost: float = 0.002        # penalize angular velocity (encourage calm)
+    # Optional "calmer flight" dials. Both default OFF because they slow PPO's
+    # learning (the agent needs speed/pitch to maneuver into the slot). The
+    # slow-motion playback (live --speed) gives the calm look for free; raise
+    # these only if you want the *learned* flight itself gentler.
+    speed_cost: float = 0.0         # penalize flying fast
+    level_cost: float = 0.0         # penalize tilt (less pitch)
 
     # --- shaping so the agent actually discovers the morphing trick ---
     # Near the wall, lining up + folding pays MORE than just barreling forward,

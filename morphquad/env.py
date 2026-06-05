@@ -219,6 +219,8 @@ class MorphQuadEnv:
         reward = reward - r.ctrl_cost * motor_cmd.mean(dim=-1)
         reward = reward - r.fold_cost * fold_rate.abs().squeeze(-1)
         reward = reward - r.spin_cost * (self.omega ** 2).sum(dim=-1)
+        reward = reward - r.speed_cost * self.vel.norm(dim=-1)
+        reward = reward - r.level_cost * (1.0 - up).clamp(min=0.0)
 
         # ---- shaping: teach the morphing trick near the wall ----
         hw = self._eff_halfwidth(self.phi).squeeze(-1)

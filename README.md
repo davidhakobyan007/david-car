@@ -121,10 +121,20 @@ python -m morphquad.live --view 2d       # flat side + top-down panels instead
 python -m morphquad.live --device cpu --envs 256   # slow, just to try it
 ```
 
-In the **3D view** you see the slotted wall, a ground grid, and the drones flying
-in from behind. As each one nears the hole it **folds its arms** — the airframe
-visibly narrows (spread looks too wide for the slot, folded slips through) — then
-unfolds on the far side. The camera slowly orbits so you get real depth.
+In the **3D view** the drones are drawn as real quadcopters — four spinning prop
+discs on arms that **fold** as the craft nears the hole (the airframe visibly
+narrows: spread looks too wide for the slot, folded slips through), then unfold
+on the far side. You see the slotted wall and a ground grid for depth.
+
+**Move the camera with the mouse:** drag to orbit, scroll to zoom, **R** to
+re-enable the gentle auto-spin. `--speed` controls how fast the sim plays —
+it defaults to `0.5` (slow motion, calmer to watch); use `--speed 1.0` for the
+real cadence or `--speed 0.25` for extra-slow.
+
+```bash
+python -m morphquad.live --speed 0.3        # extra slow, easy to watch
+python -m morphquad.live --view 2d          # flat side + top-down panels
+```
 
 `--view 2d` gives two stacked flat panels sharing the forward (x) axis:
 **SIDE** (x vs z, fly through the hole) and **TOP-DOWN** (x vs y, arms folding).
@@ -133,7 +143,12 @@ The HUD shows cumulative **PASSED / CRASHED / TIMEOUT** counts, a rolling
 pass-rate, training throughput (sps), and env-0's live arm-fold angle. Outcomes
 flash green (passed) / red (crashed) / yellow (timeout) on each drone.
 
-Keys: **SPACE** pause · **S** save checkpoint · **Q** quit (also saves).
+Keys: **drag** orbit · **scroll** zoom · **R** recenter · **SPACE** pause ·
+**S** save checkpoint · **Q** quit (also saves).
+
+> Want the *learned* flight itself gentler (not just the playback)? Raise
+> `RewardConfig.speed_cost` / `level_cost` in `config.py` — but note they slow
+> down learning, so increase training time to compensate.
 
 > Needs a display. Headless/SSH: train with `python -m morphquad.train` and use
 > the GIF viewer below, or forward X11 (`ssh -X`).

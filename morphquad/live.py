@@ -52,8 +52,11 @@ WARN = (240, 200, 90)
 DRONE_VIS_SCALE = 1.8
 
 
+SPIN = (1, 1, -1, -1)   # rotor spin directions (matches env.spin)
+
+
 def rotor_world(env: MorphQuadEnv, scale: float = DRONE_VIS_SCALE):
-    """Return (centers (n,3), rotors (n,4,3), phi (n,)) as numpy, world frame."""
+    """Return centers (n,3), rotors (n,4,3), phi (n,), R (n,3,3) as numpy world."""
     d = env.cfg.drone
     n = env.n
     phi = env.phi  # (n,1)
@@ -65,7 +68,8 @@ def rotor_world(env: MorphQuadEnv, scale: float = DRONE_VIS_SCALE):
     rw = torch.einsum("nij,nkj->nki", R, rb) + env.pos[:, None, :]
     return (env.pos.detach().cpu().numpy(),
             rw.detach().cpu().numpy(),
-            phi.squeeze(-1).detach().cpu().numpy())
+            phi.squeeze(-1).detach().cpu().numpy(),
+            R.detach().cpu().numpy())
 
 
 class Panel:
@@ -187,6 +191,39 @@ class Camera3D:
         return scr.reshape(shape + (2,)), z.reshape(shape), valid.reshape(shape)
 
 
+class Orbit:
+    """Orbit camera state driven by the mouse, with gentle auto-spin."""
+
+    def __init__(self, target, radius=3.6, az=math.pi, el=0.28):
+        self.target = np.asarray(target, float)
+        self.radius = radius
+        self.az = az          # azimuth around world-z
+        self.el = el          # elevation above horizon
+        self.dragging = False
+        self.auto = True      # slow auto-spin until the user grabs it
+
+    def handle(self, pg, ev):
+        if ev.type == pg.MOUSEBUTTONDOWN and ev.button == 1:
+            self.dragging = True; self.auto = False
+        elif ev.type == pg.MOUSEBUTTONUP and ev.button == 1:
+            self.dragging = False
+        elif ev.type == pg.MOUSEMOTION and self.dragging:
+            dx, dy = ev.rel
+            self.az -= dx * 0.01
+            self.el = float(np.clip(self.el + dy * 0.01, -0.25, 1.35))
+        elif ev.type == pg.MOUSEWHEEL:
+            self.radius = float(np.clip(self.radius * (0.9 ** ev.y), 1.5, 12.0))
+
+    def update(self, dt_spin=0.0035):
+        if self.auto and not self.dragging:
+            self.az += dt_spin
+
+    def eye(self):
+        ce, se = math.cos(self.el), math.sin(self.el)
+        d = np.array([ce * math.cos(self.az), ce * math.sin(self.az), se])
+        return self.target + self.radius * d
+
+
 def _ipt(p, valid):
     if not valid or not (np.isfinite(p[0]) and np.isfinite(p[1])):
         return None
@@ -202,7 +239,31 @@ def _seg(pg, surf, cam, a, b, col, width=1):
         pg.draw.line(surf, col, pa, pb, width)
 
 
-def draw_world_3d(pg, surf, cam, cfg, centers, rotors, phis, hud_h):
+_PROP_CIRCLE = np.stack([np.cos(np.linspace(0, 2 * np.pi, 15)),
+                         np.sin(np.linspace(0, 2 * np.pi, 15)),
+                         np.zeros(15)], axis=-1)  # (15,3) unit circle in body xy
+
+
+def _draw_prop(pg, surf, cam, center, R, radius, phase, spin_dir, col):
+    """Draw a spinning prop disc (oriented by R) at a rotor center."""
+    disc = center + (_PROP_CIRCLE * radius) @ R.T          # (15,3) world
+    P, _, V = cam.project(disc)
+    pts = [_ipt(P[i], V[i]) for i in range(len(disc))]
+    pts = [p for p in pts if p is not None]
+    if len(pts) >= 3:
+        pg.draw.lines(surf, col, True, pts, 1)
+    # two blades at the current spin phase
+    for b in range(2):
+        ang = phase * spin_dir + b * math.pi
+        tip = center + (radius * np.array([math.cos(ang), math.sin(ang), 0.0])) @ R.T
+        seg = np.stack([center, tip])
+        Pb, _, Vb = cam.project(seg)
+        a = _ipt(Pb[0], Vb[0]); bb = _ipt(Pb[1], Vb[1])
+        if a and bb:
+            pg.draw.line(surf, col, a, bb, 2)
+
+
+def draw_world_3d(pg, surf, cam, cfg, centers, rotors, phis, Rmats, spin_phase):
     t = cfg.task
     gx = t.gap_x
 
@@ -242,11 +303,14 @@ def draw_world_3d(pg, surf, cam, cfg, centers, rotors, phis, hud_h):
             pg.draw.polygon(surf, GOOD, poly, 2)
 
     # ---- drones, far-to-near ----
+    d = cfg.drone
+    prop_r = d.prop_radius * DRONE_VIS_SCALE
     n = centers.shape[0]
     _, depth, _ = cam.project(centers)
     order = np.argsort(-depth)        # far first
     for i in order:
         col = DRONE0 if i == 0 else DRONE
+        Ri = Rmats[i]
         cP, _, cV = cam.project(centers[i][None])
         c = _ipt(cP[0], cV[0])
         if c is None:
@@ -259,11 +323,13 @@ def draw_world_3d(pg, surf, cam, cfg, centers, rotors, phis, hud_h):
             r = _ipt(rP[k], rV[k])
             if r is None:
                 continue
-            pg.draw.line(surf, ARM if i == 0 else col, c, r, 2 if i == 0 else 1)
-            rad = 4 if i == 0 else 3
-            pg.draw.circle(surf, col, r, rad)
-            pg.draw.circle(surf, (255, 255, 255), r, max(1, rad - 2))
-        pg.draw.circle(surf, col, c, 3)
+            # arm (folds with phi), motor hub, and spinning prop disc
+            pg.draw.line(surf, ARM if i == 0 else col, c, r, 3 if i == 0 else 2)
+            pg.draw.circle(surf, col, r, 3 if i == 0 else 2)
+            _draw_prop(pg, surf, cam, rotors[i, k], Ri, prop_r,
+                       spin_phase, SPIN[k], col)
+        # little body hub
+        pg.draw.circle(surf, (245, 248, 255), c, 3)
 
 
 def main():
@@ -281,6 +347,9 @@ def main():
                     help="show sampled (exploring) actions instead of the mean")
     ap.add_argument("--view", default="3d", choices=["3d", "2d"],
                     help="3d orbiting camera (default) or stacked 2d panels")
+    ap.add_argument("--speed", type=float, default=0.5,
+                    help="sim steps advanced per rendered frame "
+                         "(<1 = slow motion, calmer to watch; 1 = real cadence)")
     ap.add_argument("--save", default="checkpoints/morphquad_live.pt")
     args = ap.parse_args()
 
@@ -317,8 +386,8 @@ def main():
                    (H - hud_h - 20) // 2),
                   xr, (-0.75, 0.75), "y")
     cam = Camera3D(W, H)
-    cam_t = 0.0
     gx = cfg.task.gap_x
+    orbit = Orbit(target=(gx + 0.25, 0.0, 1.45))
 
     # counters
     passes = crashes = timeouts = 0
@@ -328,10 +397,33 @@ def main():
     stats = None
     paused = False
     running = True
+    frame = 0
+    sim_accum = 0.0
+    spin_phase = 0.0
 
     num_updates = trainer.num_updates
 
+    def step_sim():
+        nonlocal viz_obs, passes, crashes, timeouts
+        with torch.no_grad():
+            if args.stochastic:
+                act, _, _ = trainer.model.act(viz_obs)
+            else:
+                act = trainer.model.act_deterministic(viz_obs)
+        viz_obs, _, terminal, trunc, _, info = viz.step(act.float())
+        done = (terminal | trunc)
+        if done.any():
+            pa, cr = info["passed"], info["crash"]
+            for i in torch.nonzero(done, as_tuple=False).squeeze(-1).tolist():
+                if bool(pa[i]):
+                    passes += 1; recent.append(1); flash[i] = [GOOD, 14]
+                elif bool(cr[i]):
+                    crashes += 1; recent.append(0); flash[i] = [BAD, 14]
+                else:
+                    timeouts += 1; recent.append(0); flash[i] = [WARN, 14]
+
     while running:
+        # ---- events every frame (responsive mouse orbit) ----
         for ev in pg.event.get():
             if ev.type == pg.QUIT:
                 running = False
@@ -340,105 +432,91 @@ def main():
                     running = False
                 elif ev.key == pg.K_SPACE:
                     paused = not paused
+                elif ev.key == pg.K_r:
+                    orbit.auto = True
                 elif ev.key == pg.K_s:
                     os.makedirs(os.path.dirname(args.save) or ".", exist_ok=True)
                     torch.save({"model": trainer.model.state_dict(),
                                 "cfg": cfg.to_dict()}, args.save)
                     print(f"saved {args.save}")
+            elif args.view == "3d":
+                orbit.handle(pg, ev)
 
-        # ---- training: a few PPO updates ----
-        if not paused:
+        # ---- training cadence ----
+        if not paused and frame % max(1, args.frames_per_update) == 0:
             for _ in range(args.updates_per_frame):
                 update += 1
                 stats = trainer.update_once(update, num_updates)
 
-        # ---- step the on-screen drones with the current policy ----
-        for _ in range(args.frames_per_update):
-            with torch.no_grad():
-                if args.stochastic:
-                    act, _, _ = trainer.model.act(viz_obs)
-                else:
-                    act = trainer.model.act_deterministic(viz_obs)
-            viz_obs, rew, terminal, trunc, term_obs, info = viz.step(act.float())
-            done = (terminal | trunc)
-            if done.any():
-                pa = info["passed"]
-                cr = info["crash"]
-                for i in torch.nonzero(done, as_tuple=False).squeeze(-1).tolist():
-                    if bool(pa[i]):
-                        passes += 1; recent.append(1); flash[i] = [GOOD, 12]
-                    elif bool(cr[i]):
-                        crashes += 1; recent.append(0); flash[i] = [BAD, 12]
-                    else:
-                        timeouts += 1; recent.append(0); flash[i] = [WARN, 12]
+        # ---- advance the on-screen sim (slow-mo via --speed) ----
+        if not paused:
+            sim_accum += max(0.02, args.speed)
+            while sim_accum >= 1.0:
+                step_sim()
+                sim_accum -= 1.0
+        spin_phase += 0.55
 
-            centers, rotors, phis = rotor_world(viz)
+        centers, rotors, phis, Rmats = rotor_world(viz)
+        orbit.update()
+        cam.look_at(orbit.eye(), orbit.target)
 
-            # ---------------- draw ----------------
-            screen.fill(BG)
-            if args.view == "3d":
-                cam_t += 0.012
-                side = 2.4 * math.sin(cam_t)           # orbit side-to-side
-                cam.look_at(eye=(gx - 3.4, side, 1.7),
-                            target=(gx + 0.25, 0.0, 1.45))
-                draw_world_3d(pg, screen, cam, cfg, centers, rotors, phis, hud_h)
-                # flash outcome rings (project drone centre)
-                for i, fv in list(flash.items()):
-                    fv[1] -= 1
-                    if fv[1] <= 0:
-                        del flash[i]; continue
-                    P, _, V = cam.project(centers[i][None])
-                    c = _ipt(P[0], V[0])
+        # ---------------- draw ----------------
+        screen.fill(BG)
+        if args.view == "3d":
+            draw_world_3d(pg, screen, cam, cfg, centers, rotors, phis,
+                          Rmats, spin_phase)
+            for i, fv in list(flash.items()):
+                fv[1] -= 1
+                if fv[1] <= 0:
+                    del flash[i]; continue
+                P, _, V = cam.project(centers[i][None])
+                c = _ipt(P[0], V[0])
+                if c is not None:
+                    pg.draw.circle(screen, fv[0], c, 18, 2)
+        else:
+            draw_panel(pg, screen, font, p_side, cfg, centers, rotors, phis,
+                       2, "SIDE VIEW  (fly through the hole)")
+            draw_panel(pg, screen, font, p_top, cfg, centers, rotors, phis,
+                       1, "TOP-DOWN  (arms fold to fit the slot)")
+            for i, fv in list(flash.items()):
+                fv[1] -= 1
+                if fv[1] <= 0:
+                    del flash[i]; continue
+                for panel, vidx in ((p_side, 2), (p_top, 1)):
+                    c = panel.pt(centers[i, 0], centers[i, vidx])
                     if c is not None:
-                        pg.draw.circle(screen, fv[0], c, 18, 2)
-            else:
-                draw_panel(pg, screen, font, p_side, cfg, centers, rotors, phis,
-                           2, "SIDE VIEW  (fly through the hole)")
-                draw_panel(pg, screen, font, p_top, cfg, centers, rotors, phis,
-                           1, "TOP-DOWN  (arms fold to fit the slot)")
-                for i, fv in list(flash.items()):
-                    fv[1] -= 1
-                    if fv[1] <= 0:
-                        del flash[i]; continue
-                    for panel, vidx in ((p_side, 2), (p_top, 1)):
-                        c = panel.pt(centers[i, 0], centers[i, vidx])
-                        if c is not None:
-                            pg.draw.circle(screen, fv[0], c, 16, 2)
+                        pg.draw.circle(screen, fv[0], c, 16, 2)
 
-            # ---------------- HUD ----------------
-            total = passes + crashes + timeouts
-            rate = (sum(recent) / len(recent)) if recent else 0.0
-            pg.draw.rect(screen, PANEL, (10, 10, W - 20, hud_h - 20),
-                         border_radius=8)
-            title = big.render("MorphQuad — learning to fold through the hole",
-                               True, TEXT)
-            screen.blit(title, (28, 20))
+        # ---------------- HUD ----------------
+        rate = (sum(recent) / len(recent)) if recent else 0.0
+        pg.draw.rect(screen, PANEL, (10, 10, W - 20, hud_h - 20), border_radius=8)
+        screen.blit(big.render("MorphQuad — learning to fold through the hole",
+                               True, TEXT), (28, 20))
 
-            def line(txt, x, y, col=TEXT):
-                screen.blit(font.render(txt, True, col), (x, y))
+        def line(txt, x, y, col=TEXT):
+            screen.blit(font.render(txt, True, col), (x, y))
 
-            phi_deg = float(np.degrees(phis[0])) if phis.size else 0.0
-            line(f"PASSED  {passes}", 28, 56, GOOD)
-            line(f"CRASHED {crashes}", 190, 56, BAD)
-            line(f"TIMEOUT {timeouts}", 360, 56, WARN)
-            line(f"recent pass-rate {rate:5.1%}  (last {len(recent)})", 540, 56,
-                 GOOD if rate > 0.5 else DIM)
+        phi_deg = float(np.degrees(phis[0])) if phis.size else 0.0
+        line(f"PASSED  {passes}", 28, 56, GOOD)
+        line(f"CRASHED {crashes}", 190, 56, BAD)
+        line(f"TIMEOUT {timeouts}", 360, 56, WARN)
+        line(f"recent pass-rate {rate:5.1%}  (last {len(recent)})", 540, 56,
+             GOOD if rate > 0.5 else DIM)
+        if stats is not None:
+            line(f"update {stats.update:>5}/{num_updates}   "
+                 f"step {stats.global_step:>11,}   {stats.sps:>7,} sps", 28, 84, DIM)
+            line(f"ep_return {stats.ep_return:7.2f}   "
+                 f"train pass {stats.pass_rate:5.1%}   entropy {stats.entropy:4.2f}   "
+                 f"arm-fold(env0) {phi_deg:4.0f}deg   speed x{args.speed:g}",
+                 28, 106, DIM)
+        line("drag orbit · scroll zoom · R recenter", W - 320, 56, DIM)
+        line("SPACE pause   S save   Q quit", W - 270, 84, DIM)
+        if paused:
+            line("[PAUSED]", W - 110, 106, WARN)
 
-            if stats is not None:
-                line(f"update {stats.update:>5}/{num_updates}   "
-                     f"step {stats.global_step:>11,}   {stats.sps:>7,} sps",
-                     28, 84, DIM)
-                line(f"ep_return {stats.ep_return:7.2f}   "
-                     f"train pass {stats.pass_rate:5.1%}   "
-                     f"entropy {stats.entropy:4.2f}   "
-                     f"arm-fold(env0) {phi_deg:4.0f}deg",
-                     28, 106, DIM)
-            line("SPACE pause   S save   Q quit", W - 270, 84, DIM)
-            if paused:
-                line("[PAUSED]", W - 110, 106, WARN)
-
-            pg.display.flip()
-            clock.tick(60)
+        pg.display.flip()
+        clock.tick(60)
+        frame += 1
 
     # save on exit
     os.makedirs(os.path.dirname(args.save) or ".", exist_ok=True)
