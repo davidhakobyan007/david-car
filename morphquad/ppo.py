@@ -169,36 +169,50 @@ class PPOTrainer:
                 ent += entropy_loss.item(); nupd += 1
         return pl / nupd, vl / nupd, ent / nupd
 
+    # --------------------------------------------------------- single update
+    def update_once(self, update: int, num_updates: int) -> TrainStats:
+        """Run exactly one PPO update (collect + optimize) and return stats.
+
+        Lets an external loop (e.g. the live pygame trainer) drive training one
+        step at a time while rendering in between.
+        """
+        p = self.cfg.ppo
+        if p.anneal_lr:
+            frac = 1.0 - (update - 1) / max(1, num_updates)
+            for g in self.opt.param_groups:
+                g["lr"] = frac * p.learning_rate
+
+        if not hasattr(self, "_t0"):
+            self._t0 = time.time()
+        adv, returns = self._collect()
+        pl, vl, ent = self._update(adv, returns)
+        gstep = update * p.num_envs * p.rollout_len
+        sps = int(gstep / (time.time() - self._t0 + 1e-9))
+        stats = TrainStats(
+            update=update, global_step=gstep, sps=sps,
+            ep_return=_mean(self._ret_hist), ep_len=_mean(self._len_hist),
+            pass_rate=_mean(self._pass_hist), crash_rate=_mean(self._crash_hist),
+            policy_loss=pl, value_loss=vl, entropy=ent,
+        )
+        self._ret_hist.clear(); self._len_hist.clear()
+        self._pass_hist.clear(); self._crash_hist.clear()
+        return stats
+
     # ----------------------------------------------------------------- loop
     def train(self, on_stats=None):
         p = self.cfg.ppo
         steps_per_update = p.num_envs * p.rollout_len
         num_updates = max(1, p.total_steps // steps_per_update)
-        global_step = 0
-        start = time.time()
-
         for update in range(1, num_updates + 1):
-            if p.anneal_lr:
-                frac = 1.0 - (update - 1) / num_updates
-                for g in self.opt.param_groups:
-                    g["lr"] = frac * p.learning_rate
-
-            adv, returns = self._collect()
-            pl, vl, ent = self._update(adv, returns)
-            global_step += steps_per_update
-
-            sps = int(global_step / (time.time() - start))
-            stats = TrainStats(
-                update=update, global_step=global_step, sps=sps,
-                ep_return=_mean(self._ret_hist), ep_len=_mean(self._len_hist),
-                pass_rate=_mean(self._pass_hist), crash_rate=_mean(self._crash_hist),
-                policy_loss=pl, value_loss=vl, entropy=ent,
-            )
-            self._ret_hist.clear(); self._len_hist.clear()
-            self._pass_hist.clear(); self._crash_hist.clear()
+            stats = self.update_once(update, num_updates)
             if on_stats is not None:
                 on_stats(stats)
         return self.model
+
+    @property
+    def num_updates(self) -> int:
+        p = self.cfg.ppo
+        return max(1, p.total_steps // (p.num_envs * p.rollout_len))
 
 
 def _mean(xs):

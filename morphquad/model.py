@@ -28,8 +28,8 @@ class ActorCritic(nn.Module):
         self.critic_body, last_c = trunk()
         self.mean = _layer_init(nn.Linear(last_a, act_dim), std=0.01)
         self.value = _layer_init(nn.Linear(last_c, 1), std=1.0)
-        # state-independent log std
-        self.log_std = nn.Parameter(torch.full((act_dim,), -0.5))
+        # state-independent log std (smaller -> more precise actions)
+        self.log_std = nn.Parameter(torch.full((act_dim,), -0.9))
 
     def _dist(self, obs: torch.Tensor) -> torch.distributions.Normal:
         mean = self.mean(self.actor_body(obs))

@@ -220,9 +220,22 @@ class MorphQuadEnv:
         reward = reward - r.fold_cost * fold_rate.abs().squeeze(-1)
         reward = reward - r.spin_cost * (self.omega ** 2).sum(dim=-1)
 
+        # ---- shaping: teach the morphing trick near the wall ----
+        hw = self._eff_halfwidth(self.phi).squeeze(-1)
+        dx = t.gap_x - cur_x
+        near = ((dx > 0.0) & (dx < r.fold_zone)).float()
+        phi_frac = (self.phi.squeeze(-1) / d.phi_max)
+        # reward folding as it approaches the wall
+        reward = reward + r.fold_shaping * near * phi_frac
+        # reward actually being narrow enough to clear the slot (centered)
+        slack = (t.gap_width * 0.5) - ((self.pos[:, 1] - t.gap_y).abs() + hw)
+        reward = reward + r.fit_shaping * near * torch.tanh(8.0 * slack).clamp(min=0)
+        # reward vertical alignment with the slot
+        z_slack = (t.gap_height * 0.5) - (self.pos[:, 2] - t.gap_z).abs()
+        reward = reward + r.align_shaping * near * torch.tanh(6.0 * z_slack).clamp(min=0)
+
         # ---- gap crossing event ----
         crossing = (prev_x < t.gap_x) & (cur_x >= t.gap_x)
-        hw = self._eff_halfwidth(self.phi).squeeze(-1)
         lat_ok = (self.pos[:, 1] - t.gap_y).abs() + hw < (t.gap_width * 0.5)
         vert_ok = (self.pos[:, 2] - t.gap_z).abs() + d.prop_radius < (t.gap_height * 0.5)
         fit = lat_ok & vert_ok & (up > 0)

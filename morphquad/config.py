@@ -60,13 +60,13 @@ class TaskConfig:
     gap_x: float = 0.0
     gap_y: float = 0.0
     gap_z: float = 1.5
-    gap_width: float = 0.20         # lateral opening (m) -- forces folding
-    gap_height: float = 0.55        # vertical opening (m)
+    gap_width: float = 0.26         # lateral opening (m) -- still forces folding
+    gap_height: float = 0.80        # vertical opening (m)
 
     spawn_dx: float = -2.0          # spawn this far in front of the wall (x)
-    spawn_jitter_pos: float = 0.25  # +/- spawn position noise (m)
-    spawn_jitter_vel: float = 0.20  # +/- spawn velocity noise (m/s)
-    spawn_jitter_tilt: float = 0.10 # +/- initial tilt noise (rad)
+    spawn_jitter_pos: float = 0.18  # +/- spawn position noise (m)
+    spawn_jitter_vel: float = 0.15  # +/- spawn velocity noise (m/s)
+    spawn_jitter_tilt: float = 0.08 # +/- initial tilt noise (rad)
 
     target_beyond: float = 1.2      # goal point this far past the wall (m)
 
@@ -82,14 +82,22 @@ class TaskConfig:
 
 @dataclass
 class RewardConfig:
-    progress: float = 1.0           # reward per meter of progress to the goal
+    progress: float = 0.7           # reward per meter of progress to the goal
     alive: float = 0.02             # small per-step alive bonus
     upright: float = 0.02           # reward * (body_z . world_z)
-    pass_bonus: float = 20.0        # big reward for cleanly crossing the slot
-    crash_penalty: float = -10.0    # hit wall / out of bounds / flipped
+    pass_bonus: float = 30.0        # big reward for cleanly crossing the slot
+    crash_penalty: float = -6.0     # hit wall / out of bounds / flipped
     ctrl_cost: float = 0.002        # penalize thrust magnitude
     fold_cost: float = 0.001        # penalize fold-rate effort
     spin_cost: float = 0.002        # penalize angular velocity (encourage calm)
+
+    # --- shaping so the agent actually discovers the morphing trick ---
+    # Near the wall, lining up + folding pays MORE than just barreling forward,
+    # so the agent learns to set up the pass instead of crashing through.
+    fold_zone: float = 1.2          # start rewarding folding this far before wall
+    fold_shaping: float = 0.8       # reward folding (phi up) while near the wall
+    fit_shaping: float = 1.6        # reward when narrow enough to fit the slot
+    align_shaping: float = 1.0      # reward lining up with the slot near the wall
 
 
 @dataclass
@@ -102,7 +110,7 @@ class PPOConfig:
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_coef: float = 0.2
-    ent_coef: float = 0.004
+    ent_coef: float = 0.002
     vf_coef: float = 0.5
     max_grad_norm: float = 1.0
     learning_rate: float = 3.0e-4

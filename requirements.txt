@@ -8,3 +8,4 @@ torch>=2.1
 numpy>=1.24
 matplotlib>=3.7      # 3D rollout viewer / GIF export
 imageio>=2.31        # optional, nicer GIF/MP4 writing
+pygame>=2.5          # live training viewer (morphquad.live)
