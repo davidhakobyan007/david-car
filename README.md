@@ -48,7 +48,18 @@ control with the reduced roll authority.
 
 ## Install
 
-You need PyTorch. For your **NVIDIA GPU**, install the CUDA build that matches
+Use a **virtual environment** — on Debian/Ubuntu (Python 3.11+) a global
+`pip install` fails with `externally-managed-environment` (PEP 668), and a venv
+also gives you a working `python` command:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate          # do this in every new terminal
+# (if venv is missing: sudo apt install python3-venv)
+pip install --upgrade pip
+```
+
+Then install PyTorch. For your **NVIDIA GPU**, pick the CUDA build that matches
 your driver (see https://pytorch.org/get-started/locally/), e.g.:
 
 ```bash
@@ -56,7 +67,11 @@ pip install torch --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements.txt
 ```
 
-> CPU also works (for the smoke test / tiny runs) but real training wants a GPU.
+> - CPU also works (for the smoke test / tiny runs) but real training wants a GPU.
+> - If torch reports no GPU, check `nvidia-smi` and match the `cuXXX` index
+>   (e.g. `cu121`) to your driver.
+> - All commands below assume the venv is active (your prompt shows `(.venv)`)
+>   and you run them from the repo root with `python` (not `python3`).
 
 ## Quick sanity check (seconds, CPU is fine)
 
@@ -108,6 +123,9 @@ python -m morphquad.viz --policy scripted --out flight.gif
 
 The viewer draws the body, the four arms (which visibly fold as `phi`
 increases), the props, the slotted wall, and the flight path.
+
+> `--show` needs a desktop/display. Over SSH or on a headless box, drop
+> `--show` and use `--out flight.gif`, then open the saved GIF.
 
 ## Tuning the challenge
 
