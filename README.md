@@ -11,6 +11,10 @@ Everything — the physics and the learning — runs as batched tensors, so the
 whole thing lives on your GPU and a few thousand simulated drones train in
 parallel.
 
+> **Just want the interactive 3D drone** (foldable arms via a button, driven by
+> a stepper motor — no training)? That lives in [`drone3d/`](drone3d/) — open it
+> in a browser. See [`drone3d/README.md`](drone3d/README.md).
+
 ```
    spread (X)            folding              folded (fits slot)
    \   /                  \  /                   ||

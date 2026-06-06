@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MorphDrone — foldable 5" quad (stepper-driven arms)</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden;
+    font-family: ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif; }
+  #app { position: fixed; inset: 0; }
+  #ui {
+    position: fixed; left: 16px; top: 16px; width: 250px; padding: 14px 16px;
+    background: rgba(18,20,26,0.72); backdrop-filter: blur(10px);
+    border: 1px solid rgba(255,255,255,0.08); border-radius: 14px; color: #e8ecf4;
+    user-select: none;
+  }
+  #ui h1 { font-size: 15px; margin: 0 0 2px; letter-spacing: .3px; }
+  #ui .sub { font-size: 11px; color: #93a0b4; margin-bottom: 12px; }
+  .btn {
+    width: 100%; padding: 11px 12px; margin: 6px 0; border-radius: 10px; border: 0;
+    font-size: 14px; font-weight: 600; cursor: pointer; color: #06231c;
+    background: linear-gradient(180deg,#67e8c0,#34d399); transition: filter .15s, transform .05s;
+  }
+  .btn:hover { filter: brightness(1.07); }
+  .btn:active { transform: translateY(1px); }
+  .btn.alt { background: linear-gradient(180deg,#8ab4ff,#5b8cff); color: #061233; }
+  .row { display:flex; align-items:center; justify-content:space-between;
+    font-size:12px; color:#c2cbda; margin:9px 0 3px; }
+  input[type=range] { width: 100%; accent-color: #34d399; }
+  .toggles { display:flex; gap:8px; margin-top:8px; }
+  .toggles label { flex:1; font-size:11px; display:flex; align-items:center; gap:6px;
+    background: rgba(255,255,255,0.05); padding:7px 8px; border-radius:8px; cursor:pointer; }
+  #readout { margin-top:12px; font-size:12px; color:#9fb0c6; line-height:1.5;
+    border-top:1px solid rgba(255,255,255,0.08); padding-top:10px; }
+  #readout b { color:#e8ecf4; }
+  #hint { position: fixed; right: 16px; bottom: 14px; font-size: 11px; color:#6f7d92; }
+  #loading { position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+    color:#9fb0c6; font-size:14px; background:#0b0d12; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="loading">loading 3D engine…</div>
+
+<div id="ui" style="display:none">
+  <h1>MorphDrone</h1>
+  <div class="sub">5″ quad · stepper-folded arms</div>
+
+  <button id="fold" class="btn">Fold arms ▸</button>
+  <button id="export" class="btn alt">Export model (.glb)</button>
+
+  <div class="row"><span>Fold amount</span><span id="pct">0%</span></div>
+  <input id="slider" type="range" min="0" max="100" value="0" />
+
+  <div class="toggles">
+    <label><input type="checkbox" id="spin" checked /> Props</label>
+    <label><input type="checkbox" id="auto" /> Orbit</label>
+  </div>
+
+  <div id="readout">
+    state: <b id="state">DEPLOYED</b><br/>
+    arm angle: <b id="ang">0°</b><br/>
+    stepper: <b id="step">0.0 turns</b>
+  </div>
+</div>
+<div id="hint">drag to orbit · scroll to zoom · right-drag to pan</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+
+const DEG = Math.PI / 180;
+const lerp = (a, b, t) => a + (b - a) * t;
+const easeInOut = t => t < 0.5 ? 2*t*t : 1 - Math.pow(-2*t+2, 2)/2;
+
+// ---------------------------------------------------------------- renderer
+const app = document.getElementById('app');
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+app.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0b0d12);
+
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 2000);
+camera.position.set(26, 17, 30);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.07;
+controls.target.set(0, 4.5, 0);
+controls.minDistance = 14;
+controls.maxDistance = 120;
+controls.maxPolarAngle = Math.PI * 0.92;
+
+// ---------------------------------------------------------------- environment
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(renderer), 0.04).texture;
+
+// key + rim + fill
+const key = new THREE.DirectionalLight(0xffffff, 2.4);
+key.position.set(18, 30, 16);
+key.castShadow = true;
+key.shadow.mapSize.set(2048, 2048);
+key.shadow.camera.near = 1; key.shadow.camera.far = 120;
+key.shadow.camera.left = -30; key.shadow.camera.right = 30;
+key.shadow.camera.top = 30; key.shadow.camera.bottom = -30;
+key.shadow.bias = -0.0004; key.shadow.radius = 6;
+scene.add(key);
+const rim = new THREE.DirectionalLight(0x88aaff, 1.1); rim.position.set(-20, 12, -18); scene.add(rim);
+scene.add(new THREE.HemisphereLight(0x9fb6ff, 0x141118, 0.5));
+
+// ---------------------------------------------------------------- ground
+{
+  const g = new THREE.CircleGeometry(120, 64);
+  const m = new THREE.MeshStandardMaterial({ color: 0x101319, roughness: 0.95, metalness: 0.0 });
+  const floor = new THREE.Mesh(g, m);
+  floor.rotation.x = -Math.PI/2; floor.position.y = 0; floor.receiveShadow = true;
+  scene.add(floor);
+  const shadowMat = new THREE.ShadowMaterial({ opacity: 0.35 });
+  const catcher = new THREE.Mesh(new THREE.CircleGeometry(60, 48), shadowMat);
+  catcher.rotation.x = -Math.PI/2; catcher.position.y = 0.01; catcher.receiveShadow = true;
+  scene.add(catcher);
+}
+
+// ---------------------------------------------------------------- textures
+function carbonTexture() {
+  const s = 256, c = document.createElement('canvas'); c.width = c.height = s;
+  const x = c.getContext('2d');
+  x.fillStyle = '#0c0d10'; x.fillRect(0,0,s,s);
+  const cell = 16;
+  for (let i=0;i<s/cell;i++) for (let j=0;j<s/cell;j++) {
+    const weave = (i+j)%2===0;
+    const g = x.createLinearGradient(i*cell, j*cell, (i+1)*cell, (j+1)*cell);
+    if (weave) { g.addColorStop(0,'#23262d'); g.addColorStop(1,'#0e1014'); }
+    else       { g.addColorStop(0,'#0e1014'); g.addColorStop(1,'#23262d'); }
+    x.fillStyle = g; x.fillRect(i*cell, j*cell, cell, cell);
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(3,3);
+  t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8;
+  return t;
+}
+const carbonMap = carbonTexture();
+
+// ---------------------------------------------------------------- materials
+const matCarbon = new THREE.MeshStandardMaterial({ map: carbonMap, color: 0x2a2d34, roughness: 0.45, metalness: 0.35, envMapIntensity: 1.0 });
+const matAlu    = new THREE.MeshStandardMaterial({ color: 0x9aa3ad, roughness: 0.28, metalness: 1.0, envMapIntensity: 1.2 });
+const matAluDark= new THREE.MeshStandardMaterial({ color: 0x3a3f47, roughness: 0.35, metalness: 1.0, envMapIntensity: 1.1 });
+const matSteel  = new THREE.MeshStandardMaterial({ color: 0xc7ccd2, roughness: 0.18, metalness: 1.0, envMapIntensity: 1.3 });
+const matPlastic= new THREE.MeshStandardMaterial({ color: 0x14171c, roughness: 0.5, metalness: 0.0, envMapIntensity: 0.8 });
+const matProp   = new THREE.MeshStandardMaterial({ color: 0x121419, roughness: 0.35, metalness: 0.05, envMapIntensity: 0.9, transparent: true, opacity: 0.96 });
+const matAccent = new THREE.MeshStandardMaterial({ color: 0x34d399, roughness: 0.4, metalness: 0.2, emissive: 0x0d3a2c, emissiveIntensity: 0.6 });
+const matStepper= new THREE.MeshStandardMaterial({ color: 0xb7bcc4, roughness: 0.22, metalness: 1.0, envMapIntensity: 1.3 });
+
+function addShadows(obj){ obj.traverse(o=>{ if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; } }); return obj; }
+
+// ---------------------------------------------------------------- gear
+function makeGear(radius, thickness, teeth, mat) {
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius, thickness, Math.max(24, teeth*2), 1), mat);
+  g.add(body);
+  const toothW = (2*Math.PI*radius)/(teeth*2.1);
+  const toothH = radius*0.16;
+  const tGeo = new THREE.BoxGeometry(toothW, thickness, toothH);
+  for (let i=0;i<teeth;i++){
+    const a = (i/teeth)*Math.PI*2;
+    const t = new THREE.Mesh(tGeo, mat);
+    t.position.set(Math.cos(a)*(radius+toothH*0.45), 0, Math.sin(a)*(radius+toothH*0.45));
+    t.rotation.y = -a;
+    g.add(t);
+  }
+  // hub
+  const hub = new THREE.Mesh(new THREE.CylinderGeometry(radius*0.35, radius*0.35, thickness*1.25, 20), matAluDark);
+  g.add(hub);
+  return addShadows(g);
+}
+
+// ---------------------------------------------------------------- prop (3 blade)
+function makeBlade(mat){
+  const shape = new THREE.Shape();
+  shape.moveTo(0, -0.18);
+  shape.quadraticCurveTo(2.4, -0.9, 5.2, -0.5);
+  shape.quadraticCurveTo(6.5, -0.1, 6.3, 0.25);
+  shape.quadraticCurveTo(4.0, 0.7, 1.6, 0.6);
+  shape.quadraticCurveTo(0.4, 0.5, 0, 0.18);
+  shape.closePath();
+  const geo = new THREE.ExtrudeGeometry(shape, { depth: 0.12, bevelEnabled: true, bevelThickness: 0.05, bevelSize: 0.05, bevelSegments: 1, steps: 1 });
+  geo.rotateX(-Math.PI/2);              // lay flat (blade in XZ)
+  const m = new THREE.Mesh(geo, mat);
+  m.rotation.x = 9*DEG;                 // blade pitch
+  return m;
+}
+function makeProp(){
+  const g = new THREE.Group();
+  const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.7, 0.85, 0.7, 24), matPlastic);
+  g.add(hub);
+  for (let i=0;i<3;i++){
+    const b = makeBlade(matProp);
+    const holder = new THREE.Group();
+    holder.add(b); holder.rotation.y = i*120*DEG;
+    g.add(holder);
+  }
+  return addShadows(g);
+}
+
+// ---------------------------------------------------------------- motor
+function makeMotor(){
+  const g = new THREE.Group();
+  const bell = new THREE.Mesh(new THREE.CylinderGeometry(1.4, 1.5, 1.0, 40), matAlu);
+  bell.position.y = 0.5; g.add(bell);
+  // top with vent holes hint (ring)
+  const top = new THREE.Mesh(new THREE.CylinderGeometry(1.42, 1.42, 0.08, 40), matAluDark);
+  top.position.y = 1.02; g.add(top);
+  for (let i=0;i<6;i++){
+    const a=i/6*Math.PI*2;
+    const hole=new THREE.Mesh(new THREE.CylinderGeometry(0.22,0.22,0.1,16), matPlastic);
+    hole.position.set(Math.cos(a)*0.8,1.06,Math.sin(a)*0.8); g.add(hole);
+  }
+  const base = new THREE.Mesh(new THREE.CylinderGeometry(1.2, 1.3, 0.35, 40), matAluDark);
+  base.position.y = -0.05; g.add(base);
+  const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.18, 1.6, 16), matSteel);
+  shaft.position.y = 1.1; g.add(shaft);
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(1.45, 0.06, 8, 40), matAccent);
+  ring.rotation.x = Math.PI/2; ring.position.y = 0.15; g.add(ring);
+  return addShadows(g);
+}
+
+// ---------------------------------------------------------------- stepper
+function makeStepper(){
+  const g = new THREE.Group();
+  // NEMA-ish square body
+  const body = new THREE.Mesh(new THREE.BoxGeometry(3.0, 3.4, 3.0), matStepper);
+  body.position.y = 1.7; g.add(body);
+  // ribbed look: thin black caps
+  for (const yy of [0.25, 3.15]) {
+    const cap = new THREE.Mesh(new THREE.BoxGeometry(3.12, 0.4, 3.12), matPlastic);
+    cap.position.y = yy; g.add(cap);
+  }
+  // round boss + output shaft (points up)
+  const boss = new THREE.Mesh(new THREE.CylinderGeometry(0.95, 0.95, 0.45, 28), matAluDark);
+  boss.position.y = 3.55; g.add(boss);
+  const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.32, 1.4, 20), matSteel);
+  shaft.position.y = 4.25; g.add(shaft);
+  // corner bolts
+  for (const sx of [-1,1]) for (const sz of [-1,1]) {
+    const bolt = new THREE.Mesh(new THREE.CylinderGeometry(0.22,0.22,0.5,12), matAluDark);
+    bolt.position.set(sx*1.15, 3.45, sz*1.15); g.add(bolt);
+  }
+  // wires
+  const wireMat = [0xff4d4d,0x4d8bff,0x39d98a,0xeeeeee].map(c=>new THREE.MeshStandardMaterial({color:c,roughness:0.6}));
+  for (let i=0;i<4;i++){
+    const w = new THREE.Mesh(new THREE.CylinderGeometry(0.09,0.09,1.6,8), wireMat[i]);
+    w.position.set(-1.5, 1.2, -0.6+i*0.4); w.rotation.z = Math.PI/2*0.8; g.add(w);
+  }
+  return addShadows(g);
+}
+
+// ================================================================ build drone
+const drone = new THREE.Group();
+scene.add(drone);
+const BODY_Y = 6.0;            // hover height of the frame
+drone.position.y = BODY_Y;
+
+// --- central frame (stacked carbon plates + standoffs) ---
+const frame = new THREE.Group(); drone.add(frame);
+function plate(y){
+  const shape = new THREE.Shape();
+  const r = 4.2, c = 1.2;      // rounded square
+  shape.moveTo(-r+c,-r);
+  shape.lineTo(r-c,-r); shape.quadraticCurveTo(r,-r,r,-r+c);
+  shape.lineTo(r,r-c);  shape.quadraticCurveTo(r,r,r-c,r);
+  shape.lineTo(-r+c,r); shape.quadraticCurveTo(-r,r,-r,r-c);
+  shape.lineTo(-r,-r+c);shape.quadraticCurveTo(-r,-r,-r+c,-r);
+  const geo = new THREE.ExtrudeGeometry(shape, { depth: 0.32, bevelEnabled:true, bevelThickness:0.08, bevelSize:0.08, bevelSegments:1, steps:1 });
+  geo.rotateX(-Math.PI/2);
+  const m = new THREE.Mesh(geo, matCarbon); m.position.y = y;
+  return addShadows(m);
+}
+frame.add(plate(-0.2));
+frame.add(plate(4.2));
+for (const sx of [-1,1]) for (const sz of [-1,1]) {
+  const post = new THREE.Mesh(new THREE.CylinderGeometry(0.3,0.3,4.2,16), matAlu);
+  post.position.set(sx*3.0, 2.1, sz*3.0); frame.add(addShadows(post));
+}
+
+// --- stepper in the middle, driving a central gear ---
+const Rc = 1.5, Ra = 1.9, thick = 0.7, hingeR = Rc + Ra;
+const stepper = makeStepper(); stepper.position.y = -0.2; drone.add(stepper);
+const centralGear = makeGear(Rc, thick, 14, matSteel);
+centralGear.position.y = 5.0; drone.add(centralGear);
+
+// --- four arms on hinges around the central gear ---
+const arms = [];
+const baseYaws = [45, 135, 225, 315].map(d => d*DEG);
+const ARM_LEN = 7.6;
+const FOLD_MAX = 102 * DEG;     // how far the arms swing when folded
+
+baseYaws.forEach((yaw, idx) => {
+  const hinge = new THREE.Group();
+  hinge.position.set(Math.cos(yaw)*hingeR, 5.0, Math.sin(yaw)*hingeR);
+  drone.add(hinge);
+
+  // gear at the hinge (meshes with the central gear)
+  const gear = makeGear(Ra, thick, 18, matAluDark);
+  hinge.add(gear);
+  // hinge pin
+  const pin = new THREE.Mesh(new THREE.CylinderGeometry(0.35,0.35,2.2,16), matSteel);
+  hinge.add(pin);
+
+  // the arm assembly is parented to a yaw-pivot so folding = rotate about Y
+  const pivot = new THREE.Group(); hinge.add(pivot);
+  pivot.rotation.y = -yaw;        // local +X points radially outward at deploy
+
+  const arm = new THREE.Mesh(new THREE.BoxGeometry(ARM_LEN, 0.5, 1.5), matCarbon);
+  arm.position.set(ARM_LEN/2, 0, 0); addShadows(arm); pivot.add(arm);
+  // top reinforcement strip
+  const strip = new THREE.Mesh(new THREE.BoxGeometry(ARM_LEN*0.9, 0.12, 0.5), matAccent);
+  strip.position.set(ARM_LEN/2, 0.32, 0); pivot.add(strip);
+
+  // motor mount + motor + prop at the end
+  const mount = new THREE.Mesh(new THREE.CylinderGeometry(1.7,1.8,0.5,32), matAluDark);
+  mount.position.set(ARM_LEN, 0, 0); addShadows(mount); pivot.add(mount);
+  const motor = makeMotor(); motor.position.set(ARM_LEN, 0.25, 0); pivot.add(motor);
+  const prop = makeProp(); prop.position.set(ARM_LEN, 1.95, 0); pivot.add(prop);
+
+  arms.push({ hinge, gear, pivot, prop, yaw, dir: 1 });   // all same dir -> meshes with one sun gear
+});
+
+// frame for camera framing
+controls.target.set(0, BODY_Y, 0);
+controls.update();
+
+// ---------------------------------------------------------------- fold logic
+let foldTarget = 0;      // 0..1
+let fold = 0;            // eased current
+function applyFold(s){
+  const arm = FOLD_MAX * s;
+  for (const a of arms){
+    a.hinge.rotation.y = a.dir * arm;            // arm + its gear swing about the hinge
+  }
+  // sun gear counter-rotates by the gear ratio (visual coupling)
+  centralGear.rotation.y = -(Ra/Rc) * arm;
+  // readout
+  const deg = Math.round(arm/DEG);
+  document.getElementById('ang').textContent = deg + '°';
+  document.getElementById('step').textContent = ((Ra/Rc)*arm/(Math.PI*2)).toFixed(2) + ' turns';
+  document.getElementById('state').textContent = s > 0.5 ? 'FOLDED' : 'DEPLOYED';
+  document.getElementById('pct').textContent = Math.round(s*100) + '%';
+  document.getElementById('slider').value = Math.round(s*100);
+  document.getElementById('fold').textContent = s > 0.5 ? '◂ Unfold arms' : 'Fold arms ▸';
+}
+
+// ---------------------------------------------------------------- UI
+document.getElementById('fold').onclick = () => { foldTarget = foldTarget > 0.5 ? 0 : 1; };
+document.getElementById('slider').oninput = e => { foldTarget = e.target.value/100; fold = foldTarget; applyFold(fold); };
+let spinOn = true, autoOn = false;
+document.getElementById('spin').onchange = e => spinOn = e.target.checked;
+document.getElementById('auto').onchange = e => { autoOn = e.target.checked; controls.autoRotate = autoOn; controls.autoRotateSpeed = 1.1; };
+document.getElementById('export').onclick = () => {
+  new GLTFExporter().parse(drone, (glb) => {
+    const blob = new Blob([glb], { type: 'model/gltf-binary' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+    a.download = 'morphdrone.glb'; a.click();
+  }, (err)=>console.error(err), { binary: true });
+};
+
+// ---------------------------------------------------------------- loop
+const clock = new THREE.Clock();
+function tick(){
+  const dt = clock.getDelta();
+  // ease the fold toward target (smooth stepper motion)
+  if (Math.abs(fold - foldTarget) > 1e-4){
+    const dir = Math.sign(foldTarget - fold);
+    fold = THREE.MathUtils.clamp(fold + dir * dt * 0.9, 0, 1);
+    applyFold(easeInOut(fold));
+  }
+  // spin props (slower when folded)
+  if (spinOn){
+    const rpm = lerp(38, 10, fold);
+    for (const a of arms) a.prop.rotation.y += dt * rpm * (a.dir>0?1:-1);
+  }
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(tick);
+}
+
+applyFold(0);
+document.getElementById('loading').style.display = 'none';
+document.getElementById('ui').style.display = 'block';
+tick();
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
