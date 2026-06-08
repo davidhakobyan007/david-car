@@ -38,7 +38,12 @@ locks on and follows it. For a tighter fit, **click and drag** a box instead.
 | `+` / `-`             | Grow / shrink the default click box           |
 | `r`                   | Reset — stop tracking, pick a new object      |
 | `c`                   | Cycle tracker (KCF → MOSSE → CSRT)            |
+| `m`                   | Toggle mirror (flipped) camera view           |
 | `q` or `ESC`          | Quit                                          |
+
+If the tracker loses the object, it **automatically searches the frame and
+re-locks** on it (box turns orange while searching). The default tracker is
+**CSRT**, the most robust. Switch to a faster one with `c` or `--tracker`.
 
 ## Speed vs. accuracy
 

@@ -59,17 +59,24 @@ def create_tracker(name):
 
 
 class TrackerApp:
-    def __init__(self, camera_index=0, tracker_name="KCF", box_size=120,
-                 width=None, height=None):
+    def __init__(self, camera_index=0, tracker_name="CSRT", box_size=120,
+                 width=None, height=None, mirror=True):
         self.camera_index = camera_index
         self.tracker_name = tracker_name.upper()
         self.box_size = box_size
         self.req_width = width
         self.req_height = height
+        self.mirror = mirror
 
         self.tracker = None
         self.tracking = False
         self.bbox = None  # (x, y, w, h)
+
+        # Template of the object, kept for automatic re-acquisition when the
+        # tracker loses the lock.
+        self.template = None
+        self.template_size = None
+        self.lost_frames = 0
 
         # Mouse drag state.
         self.drag_start = None
@@ -106,7 +113,7 @@ class TrackerApp:
             self.drag_now = None
 
     # -- tracking -------------------------------------------------------
-    def start_tracking(self, frame, bbox):
+    def start_tracking(self, frame, bbox, store_template=True):
         x, y, w, h = bbox
         h_img, w_img = frame.shape[:2]
 
@@ -121,11 +128,44 @@ class TrackerApp:
         self.tracker.init(frame, bbox)
         self.bbox = bbox
         self.tracking = True
+        self.lost_frames = 0
+
+        # Remember what the object looks like (only on a fresh user selection),
+        # so we can re-find it later if the tracker fails.
+        if store_template:
+            roi = frame[y:y + h, x:x + w]
+            if roi.size > 0:
+                self.template = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                self.template_size = (w, h)
+
+    def reacquire(self, frame):
+        """Search the whole frame for the saved template and re-lock on it."""
+        if self.template is None:
+            return False
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        tw, th = self.template_size
+        if gray.shape[0] < th or gray.shape[1] < tw:
+            return False
+
+        res = cv2.matchTemplate(gray, self.template, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, max_loc = cv2.minMaxLoc(res)
+
+        # 0.45 is a forgiving threshold; raise it if it re-locks onto the
+        # wrong thing, lower it if it fails to re-find the object.
+        if max_val >= 0.45:
+            self.start_tracking(frame, (max_loc[0], max_loc[1], tw, th),
+                                store_template=False)
+            return True
+        return False
 
     def reset(self):
         self.tracker = None
         self.tracking = False
         self.bbox = None
+        self.template = None
+        self.template_size = None
+        self.lost_frames = 0
 
     # -- main loop ------------------------------------------------------
     def run(self):
@@ -146,6 +186,8 @@ class TrackerApp:
         ok, frame = cap.read()
         if not ok:
             raise RuntimeError("Could not read a frame from the camera.")
+        if self.mirror:
+            frame = cv2.flip(frame, 1)
         cv2.setMouseCallback(self.window, self.on_mouse, frame)
 
         prev_t = time.time()
@@ -156,12 +198,16 @@ class TrackerApp:
             if not ok:
                 break
 
+            if self.mirror:
+                frame = cv2.flip(frame, 1)
+
             # Keep the latest frame available to the mouse callback.
             cv2.setMouseCallback(self.window, self.on_mouse, frame)
 
             if self.tracking and self.tracker is not None:
                 ok, box = self.tracker.update(frame)
                 if ok:
+                    self.lost_frames = 0
                     self.bbox = tuple(int(v) for v in box)
                     x, y, w, h = self.bbox
                     cv2.rectangle(frame, (x, y), (x + w, y + h),
@@ -169,9 +215,16 @@ class TrackerApp:
                     cx, cy = x + w // 2, y + h // 2
                     cv2.circle(frame, (cx, cy), 3, (0, 255, 0), -1)
                 else:
-                    cv2.putText(frame, "Lost - press r to reselect",
-                                (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-                                (0, 0, 255), 2)
+                    # Tracker lost it — try to automatically re-find it.
+                    self.lost_frames += 1
+                    if self.reacquire(frame):
+                        x, y, w, h = self.bbox
+                        cv2.rectangle(frame, (x, y), (x + w, y + h),
+                                      (0, 200, 255), 2)
+                    else:
+                        cv2.putText(frame, "Searching... (press r to reselect)",
+                                    (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                                    (0, 0, 255), 2)
 
             # Draw the rubber-band rectangle while dragging.
             if self.dragging and self.drag_start and self.drag_now:
@@ -207,6 +260,8 @@ class TrackerApp:
                     if self.tracker_name in TRACKER_ORDER else 0
                 self.tracker_name = TRACKER_ORDER[(idx + 1) % len(TRACKER_ORDER)]
                 self.reset()
+            elif key == ord("m"):
+                self.mirror = not self.mirror
 
         cap.release()
         cv2.destroyAllWindows()
@@ -216,9 +271,11 @@ def main():
     parser = argparse.ArgumentParser(description="Real-time object tracker.")
     parser.add_argument("--camera", type=int, default=0,
                         help="Camera index (default: 0).")
-    parser.add_argument("--tracker", default="KCF",
+    parser.add_argument("--tracker", default="CSRT",
                         choices=["KCF", "MOSSE", "CSRT"],
-                        help="Tracking algorithm (default: KCF).")
+                        help="Tracking algorithm (default: CSRT, most robust).")
+    parser.add_argument("--no-mirror", action="store_true",
+                        help="Disable the mirror (flipped) camera view.")
     parser.add_argument("--box-size", type=int, default=120,
                         help="Default box size for a single click (px).")
     parser.add_argument("--width", type=int, default=None,
@@ -229,7 +286,7 @@ def main():
 
     app = TrackerApp(camera_index=args.camera, tracker_name=args.tracker,
                      box_size=args.box_size, width=args.width,
-                     height=args.height)
+                     height=args.height, mirror=not args.no_mirror)
     app.run()
 
 
